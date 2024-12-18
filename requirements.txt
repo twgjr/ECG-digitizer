@@ -1,0 +1,10 @@
+scikit-learn
+numpy
+torchmetrics
+wfdb
+pandas
+pillow
+matplotlib
+torch
+lightning
+ipykernel

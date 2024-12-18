@@ -1,4 +1,6 @@
-import matplotlib as plt
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 import torch
 from data import ECGDataSet
 from sklearn.metrics import mean_squared_error, r2_score

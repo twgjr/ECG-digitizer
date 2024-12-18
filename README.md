@@ -22,3 +22,8 @@ The dataset being used is the [PTBXL ECG dataset](https://physionet.org/content/
 [Python ECG Image Kit](https://github.com/alphanumericslab/ecg-image-kit)
 
 Synthetic images have to be generated with the PhyisioNet ECG Image Kit.  
+
+# Setup
+1.  Use a python environment with version 3.12 `conda create -n ecg python=3.12`
+2.  Install pip dependencies using the requirements.txt file `pip install -r requirements.txt`
+3.  Register the conda environment with jupyter notebook kernel if needed `python -m ipykernel install --user --name=ecg --display-name "ecg"`

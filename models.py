@@ -17,6 +17,8 @@ class ECGRegressor(L.LightningModule):
             TM.regression.MeanAbsoluteError(), 
             TM.regression.R2Score()
         ]))
+        
+        # validation outputs and targets
         self.validation_step_outputs = []
         self.validation_step_targets = []
 
@@ -38,28 +40,28 @@ class ECGRegressor(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        logits = self.forward(x)
-        loss = self.loss(logits, y)
+        output = self.forward(x)
+        loss = self.loss(output, y)
         self.log('train_loss', loss)
         return loss
     
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        logits = self.forward(x)
-        loss = self.loss(logits, y)
+        output = self.forward(x)
+        loss = self.loss(output, y)
         self.log('val_loss', loss, on_step=True, on_epoch=True)
-        self.validation_step_outputs.append(logits)
+        self.validation_step_outputs.append(output)
         self.validation_step_targets.append(y)
         return loss
     
     def test_step(self, batch, batch_idx):
         x, y = batch
-        logits = self.forward(x)
-        loss = self.loss(logits, y)
+        output = self.forward(x)
+        loss = self.loss(output, y)
         self.log('test_loss', loss, on_step=True, on_epoch=True)
         
-        # Store predictions, targets, and residuals
-        self.test_step_outputs.append(logits)
+        # Store predictions, targets
+        self.test_step_outputs.append(output)
         self.test_step_targets.append(y)
         return loss
     
@@ -85,39 +87,3 @@ class ECGRegressor(L.LightningModule):
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
-
-
-class CNNModel(nn.Module):
-    def __init__(self, image_dims=(425, 10), num_channels=1, num_kernels=64, kernel_size=3, stride=1, padding=1, output_dim=1):
-        super().__init__()
-        self.output_dim = output_dim
-        
-        # Encoder
-        self.encoder = nn.Sequential(
-            nn.Conv2d(num_channels, num_kernels, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(num_kernels),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # Halves spatial dimensions
-            
-            nn.Conv2d(num_kernels, num_kernels * 2, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(num_kernels * 2),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            nn.Conv2d(num_kernels * 2, num_kernels * 4, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(num_kernels * 4),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-
-        # Flatten and project to scalar
-        self.encoder_output_dim = num_kernels * 4  # Matches final channel count
-        self.embedding_layer = nn.Sequential(
-            nn.Flatten(),  # Flattens (256, 53, 1)
-            nn.Linear(self.encoder_output_dim * 53 * 1, self.output_dim)  # Output is 1 scalar
-        )
-
-    def forward(self, x):
-        x = self.encoder(x)  # Pass through the encoder
-        x = self.embedding_layer(x)  # Pass through the embedding layer
-        return x
