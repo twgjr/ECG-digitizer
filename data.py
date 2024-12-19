@@ -30,11 +30,6 @@ def get_X(ecg_id_df):
     
     # join the dataframes
     X = pd.DataFrame({'ecg_id':ecg_id_df, 'img':X_img}).reset_index(drop=True)
-
-    # filter out any images that are not the expected 425x550
-    X = X[X['img'].apply(
-        lambda img: isinstance(img, np.ndarray) and img.shape == (1,425,550)
-    )].reset_index(drop=True)
     return X
 
 
@@ -44,15 +39,20 @@ def img_to_np(gs_img: Image):
     return np_array
 
 
-def get_image(ecg_id, is_gray=True):
+def get_image(ecg_id, is_gray=True, scale_dim=512):
     print(f"ecg_id: {ecg_id}", end="\r")
 
     img_path = os.path.join(ecg_rel_path_base(ecg_id), f'{ecg_id:05}_hr-0.png')
 
     if(is_gray):
-        return Image.open(img_path).convert('L')
+        img = Image.open(img_path).convert('L')
     else:
-        return Image.open(img_path).convert('RGB')
+        img = Image.open(img_path).convert('RGB')
+
+    # scale image
+    img = img.resize((scale_dim, scale_dim))
+    
+    return img
 
 
 def get_outcomes(X_split, target_lead_name=None):
