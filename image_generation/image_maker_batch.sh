@@ -1,32 +1,27 @@
 #!/bin/bash
 
-# this assumes 8 cores and 32GB RAM
+echo "Running image making script over groups"
 
-echo "Running image making script over batches"
+# Total number of groups
+total_groups=22
+groups_per_batch=4
 
-# Loop from 0 to 21
-# for i in {0..7}
-# do
-#     echo "Processing batch $i"
-#     python image_maker.py --batch $i &
-# done
-
-# wait
-
-for i in {8..15}
+# Outer loop to process batches
+for start_group in $(seq 0 $((groups_per_batch)) $((total_groups - 1)))
 do
-    echo "Processing batch $i"
-    python image_maker.py --batch $i &
+    end_group=$((start_group + groups_per_batch - 1))
+    if [ $end_group -ge $total_groups ]; then
+        end_group=$((total_groups - 1))
+    fi
+
+    for i in $(seq $start_group $end_group)
+    do
+        echo "Processing group $i"
+        python image_maker.py --group $i --title 'base' &
+    done
+
+    wait
+    echo "Completed groups $start_group to $end_group"
 done
 
-wait
-
-for i in {16..21}
-do
-    echo "Processing batch $i"
-    python image_maker.py --batch $i &
-done
-
-wait
-
-echo "Completed all batches"
+echo "Completed all groups"

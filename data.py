@@ -10,7 +10,7 @@ from PIL import Image
 
 def ecg_rel_path_base(ecg_id):
     dir_num = int(ecg_id / 1000)
-    base_path = os.path.join("..", 'data', 'ptb_xl', 'records500', f'{dir_num:02}000')
+    base_path = os.path.join("..", 'data', 'ptb_xl', 'records100', f'{dir_num:02}000','base')
     return base_path
 
 

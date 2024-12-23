@@ -1,5 +1,5 @@
 scikit-learn
-numpy
+numpy==1.26.4
 torchmetrics
 wfdb
 pandas
@@ -8,3 +8,11 @@ matplotlib
 torch
 lightning
 ipykernel
+imgaug
+qrcode
+tensorflow
+seaborn
+spacy
+bs4
+validators
+imutils
