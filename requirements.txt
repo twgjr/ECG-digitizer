@@ -1,18 +1,18 @@
-scikit-learn
-numpy==1.26.4
-torchmetrics
-wfdb
-pandas
+# scikit-learn
+# numpy==1.26.4
+# torchmetrics
+# wfdb
+# pandas
 pillow
-matplotlib
-torch
-lightning
+# matplotlib
+# torch
+# lightning
 ipykernel
-imgaug
-qrcode
-tensorflow
-seaborn
-spacy
-bs4
-validators
-imutils
+# imgaug
+# qrcode
+# tensorflow
+# seaborn
+# spacy
+# bs4
+# validators
+# imutils
