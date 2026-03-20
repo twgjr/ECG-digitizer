@@ -2,7 +2,7 @@
 # numpy==1.26.4
 # torchmetrics
 # wfdb
-# pandas
+pandas
 pillow
 # matplotlib
 # torch
@@ -11,7 +11,7 @@ ipykernel
 # imgaug
 # qrcode
 # tensorflow
-# seaborn
+seaborn
 # spacy
 # bs4
 # validators
