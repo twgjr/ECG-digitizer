@@ -9,3 +9,10 @@ I plan to train the model in three stages:
 1. Train a signal autocoder to learn a good representation of the ECG signals without the images or labels. 1D to 1D CNN.
 2. Freeze the decoder and train an image encoder to learn to map the ECG images to the same latent space as the signal autocoder. 2D to 1D CNN.
 3. Unfreeze the decoder and train the whole thing end to end with the labels. 2D to 1D CNN with classification head.
+
+# Data Restoration
+If you tinker with the raw data and need to restore it (e.g. to retest the EDA notebook), use:
+```bash
+dvc pull data.dvc
+```
+Note: `dvc pull` alone will fail because `models/signal_autoencoder.ckpt` has no hash recorded (the training pipeline has not been run yet and there is no `dvc.lock`). Use `dvc pull data.dvc` to pull only the data.
