@@ -1,0 +1,67 @@
+# =============================================================================
+# DVC Remote Setup (run once — already configured in .dvc/config)
+# =============================================================================
+# dvc remote add -d azureml azure://data
+# dvc remote modify azureml account_name circuitsimdatadvc
+#
+# For authentication on Azure ML compute, use a managed identity or SAS token:
+#   dvc remote modify azureml sas_token $AZURE_STORAGE_SAS_TOKEN
+# Or with DefaultAzureCredential (managed identity):
+#   dvc remote modify azureml uses_feature_credential true
+#
+# =============================================================================
+# DATA SETUP (run once from the machine where you downloaded the Kaggle data)
+# =============================================================================
+# 1. Download the competition data:
+#      kaggle competitions download -c physionet-ecg-image-digitization -p data/raw
+#      unzip data/raw/physionet-ecg-image-digitization.zip -d data/raw
+#
+# 2. Track the raw data with DVC (creates data/raw.dvc, gitignores data/raw):
+#      dvc add data/raw
+#
+# 3. Push the 80GB dataset to Azure Blob (circuitsimdatadvc/data):
+#      dvc push data/raw.dvc
+#
+# 4. Commit the .dvc pointer file to git:
+#      git add data/raw.dvc .gitignore && git commit -m "track raw ECG dataset with DVC"
+#
+# =============================================================================
+# ON EVERY AZURE ML COMPUTE NODE (replaces downloading from Kaggle)
+# =============================================================================
+# Pull raw data from Azure Blob (~much faster than Kaggle):
+#   dvc pull data/raw.dvc
+#
+# Pull everything (data + model checkpoints):
+#   dvc pull
+#
+# After training, push updated model checkpoints:
+#   dvc push
+# =============================================================================
+
+stages:
+  # Stage 1: Train a 1D signal autoencoder to learn a latent ECG representation.
+  # Uses only the raw waveform signals — no images loaded, so fast and cheap.
+  train_signal_autoencoder:
+    cmd: python train.py --stage signal_autoencoder
+    deps:
+      - train.py
+      - models.py
+      - data.py
+      - data/manifests/train.csv
+      - data/manifests/val.csv
+    params:
+      - params.yaml:
+          - training
+          - signal_autoencoder
+    outs:
+      - models/signal_autoencoder.ckpt
+    metrics:
+      - metrics/signal_autoencoder.json:
+          cache: false
+
+  # Stage 2: Freeze the signal decoder, train a 2D image encoder to map
+  # ECG images into the same latent space as the signal autoencoder.
+  # Streams images from data.root_path to avoid loading 80GB into memory.
+
+  # Stage 3: Unfreeze the decoder and fine-tune the full pipeline end-to-end.
+ 

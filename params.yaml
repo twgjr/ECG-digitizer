@@ -1,0 +1,49 @@
+data:
+  # Path where the Kaggle dataset is mounted or downloaded on Azure ML.
+  # Override at runtime: dvc repro --set-param data.root_path=/mnt/azureml/...
+  root_path: data/raw
+  scale_dim: 512
+  target_lead: null          # null = all leads; or e.g. "I", "II", etc.
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+  # T4 = 16GB VRAM. 512x512 images are large; 16 keeps memory safe.
+  # Use accumulate_grad_batches in each stage to simulate a larger effective batch.
+  batch_size: 16
+  num_workers: 4             # parallel DataLoader workers on Azure ML compute
+  pin_memory: true
+
+training:
+  seed: 42
+  precision: 16-mixed        # fp16 AMP — significant speedup on T4 tensor cores
+
+# Stage 1: 1D CNN autoencoder trained on raw ECG signals only (no images).
+# Signals only — no image I/O, so batch_size can be raised independently here.
+signal_autoencoder:
+  max_epochs: 50
+  lr: 1e-3
+  batch_size: 256            # signals are small; can afford a large batch
+  latent_dim: 256
+  encoder_channels: [32, 64, 128, 256]
+  decoder_channels: [256, 128, 64, 32]
+  kernel_size: 7
+  dropout: 0.1
+
+# Stage 2: 2D image encoder trained to match the signal autoencoder latent space.
+# The signal autoencoder decoder is frozen.
+image_encoder:
+  max_epochs: 50
+  lr: 1e-3
+  accumulate_grad_batches: 4  # effective batch = 16 * 4 = 64
+  latent_dim: 256             # must match signal_autoencoder.latent_dim
+  encoder_channels: [32, 64, 128, 256]
+  kernel_size: 3
+  dropout: 0.1
+  freeze_decoder: true
+
+# Stage 3: Unfreeze decoder and fine-tune the full model end-to-end.
+end_to_end:
+  max_epochs: 30
+  lr: 1e-4                   # lower LR for fine-tuning
+  accumulate_grad_batches: 4
+  freeze_decoder: false
