@@ -39,6 +39,9 @@
 # =============================================================================
 
 stages:
+  # Preprocessing stage:
+  
+
   # Stage 1: Train a 1D signal autoencoder to learn a latent ECG representation.
   # Uses only the raw waveform signals — no images loaded, so fast and cheap.
   train_signal_autoencoder:

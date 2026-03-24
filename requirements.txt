@@ -16,3 +16,4 @@ seaborn
 # bs4
 # validators
 # imutils
+scipy
