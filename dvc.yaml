@@ -56,8 +56,6 @@ stages:
       - params.yaml:
           - training
           - signal_autoencoder
-    outs:
-      - models/signal_autoencoder.ckpt
     metrics:
       - metrics/signal_autoencoder.json:
           cache: false
