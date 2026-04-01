@@ -21,6 +21,7 @@ import numpy as np
 import os
 from torch.utils.data import Dataset, Subset
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 
 class ECGDataset(Dataset):
@@ -31,6 +32,7 @@ class ECGDataset(Dataset):
 
     def load_data(self):
         # Load the CSV file
+        print(f"Loading CSV file from: {self.csv_path}")
         df = pd.read_csv(self.csv_path)
 
         # Initialize an array to hold the ECG data
@@ -40,11 +42,12 @@ class ECGDataset(Dataset):
         num_timesteps = 2500
         num_cols = 4
         num_segment_timesteps = num_timesteps // num_cols  # 625 timesteps per segment
+        print(f"Initializing data array with shape: ({num_samples * num_segments}, {num_segment_timesteps})")
         self.data = np.full((num_samples * num_segments, num_segment_timesteps), np.nan)
         print(f"Initialized data array with shape: {self.data.shape} with # NaN values: {np.isnan(self.data).sum()}")
 
         # Load each sample's ECG data into the array
-        for i, row in df.reset_index(drop=True).iterrows():
+        for i, row in tqdm(df.reset_index(drop=True).iterrows(), total=len(df), desc="Loading ECG data"):
             data_index = i * num_segments
             sample_id = row["id"]
             file_path = os.path.join(self.data_dir, str(sample_id), f"{sample_id}_250Hz.csv")
