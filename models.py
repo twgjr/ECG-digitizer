@@ -1,89 +1,89 @@
-import torch
-from torch import nn, optim
-import torchmetrics as TM
-import lightning as L
+import math
+from torch import nn
+import torch.nn.functional as F
 
-
-class ECGRegressor(L.LightningModule):
-    def __init__(self, encoder, decoder):
+class Encoder(nn.Module):
+    def __init__(self, seq_len, depth, latent_dim): # 2500, 4, 64
         super().__init__()
-        self.loss = nn.MSELoss(reduction='sum')
-        self.encoder = encoder
-        self.decoder = decoder
-        
-        # Validation metrics
-        self.val_metrics_tracker = TM.wrappers.MetricTracker(TM.MetricCollection([
-            TM.regression.MeanSquaredError(), 
-            TM.regression.MeanAbsoluteError(), 
-            TM.regression.R2Score()
-        ]))
-        
-        # validation outputs and targets
-        self.validation_step_outputs = []
-        self.validation_step_targets = []
+        self.seq_len = seq_len
+        self.depth = depth
+        padded_seq_len = math.ceil(seq_len / (2 ** depth)) * (2 ** depth)
+        # double channels and halve sequence length at each layer
+        self.conv_list = nn.ModuleList()
+        for i in range(depth):
+            in_channels = (2 ** i)
+            out_channels = (2 ** (i+1))
 
-        # Test metrics
-        self.test_metrics_tracker = TM.wrappers.MetricTracker(TM.MetricCollection([
-            TM.regression.MeanSquaredError(), 
-            TM.regression.MeanAbsoluteError(), 
-            TM.regression.R2Score()
-        ]))
-        
-        # Test outputs and targets
-        self.test_step_outputs = []
-        self.test_step_targets = []
+            if i == depth - 1:
+                out_channels = latent_dim
+            self.conv_list.append(
+                nn.Sequential(
+                    nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+                    nn.MaxPool1d(kernel_size=2, stride=2),
+                    nn.ReLU(),
+                )
+            )
+        # collapse the channel feature maps into a single vector maintaining the sequence order
+        self.pool_conv = nn.Conv1d(latent_dim, 1, kernel_size=1, stride=1, padding=0)
+        # regardless of the out size of pool_conv, we want to map it to the latent dimension
+        self.latent_linear = nn.Linear(padded_seq_len // (2 ** depth), latent_dim)
 
     def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
+        pad = (2 ** self.depth - self.seq_len % (2 ** self.depth)) % (2 ** self.depth)
+        x = F.pad(x, (0, pad))  # pad to next 2^depth multiple
+        x = x.unsqueeze(1)  # (B, 1, padded_seq_len)
+        for conv in self.conv_list:
+            x = conv(x)
+            print(f"After conv: {x.shape}")
+        x = self.pool_conv(x)
+        print(f"After pool_conv: {x.shape}")
+        x = x.view(x.size(0), -1)
+        x = self.latent_linear(x)
+        print(f"After latent_linear: {x.shape}")
         return x
 
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        output = self.forward(x)
-        loss = self.loss(output, y)
-        self.log('train_loss', loss)
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        output = self.forward(x)
-        loss = self.loss(output, y)
-        self.log('val_loss', loss, on_step=True, on_epoch=True)
-        self.validation_step_outputs.append(output)
-        self.validation_step_targets.append(y)
-        return loss
-    
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        output = self.forward(x)
-        loss = self.loss(output, y)
-        self.log('test_loss', loss, on_step=True, on_epoch=True)
-        
-        # Store predictions, targets
-        self.test_step_outputs.append(output)
-        self.test_step_targets.append(y)
-        return loss
-    
-    def on_validation_start(self):
-        self.validation_step_outputs.clear()
-        self.validation_step_targets.clear()
-    
-    def on_validation_epoch_end(self):
-        all_preds = torch.vstack(self.validation_step_outputs)
-        all_targets = torch.vstack(self.validation_step_targets)
-        loss = nn.functional.mse_loss(all_preds, all_targets)
-        self.val_metrics_tracker.increment()
-        self.val_metrics_tracker.update(all_preds, all_targets)
-        self.log('val_loss_epoch_end', loss)
-    
-    def on_test_epoch_end(self):
-        all_preds = torch.vstack(self.test_step_outputs)
-        all_targets = torch.vstack(self.test_step_targets)
-        
-        self.test_metrics_tracker.increment()
-        self.test_metrics_tracker.update(all_preds, all_targets)
-        
-    def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
+class Decoder(nn.Module):
+    def __init__(self, seq_len, depth, latent_dim):
+        super().__init__()
+        self.seq_len = seq_len
+        padded_seq_len = math.ceil(seq_len / (2 ** depth)) * (2 ** depth)
+        # mirror of encoder's pool_conv + latent_linear
+        self.latent_linear = nn.Linear(latent_dim, padded_seq_len // (2 ** depth))
+        self.unpool_conv = nn.Conv1d(1, latent_dim, kernel_size=1, stride=1, padding=0)
+        # halve channels and double sequence length at each layer
+        self.conv_list = nn.ModuleList()
+        for i in range(depth):
+            in_channels = (latent_dim if i == 0 else (2 ** (depth - i)))
+            out_channels = (2 ** (depth - i - 1))
+            self.conv_list.append(
+                nn.Sequential(
+                    nn.ConvTranspose1d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+                    nn.Upsample(scale_factor=2),
+                    nn.ReLU(),
+                )
+            )
+
+    def forward(self, x):
+        x = self.latent_linear(x)       # (B, seq_len // 2**depth)
+        print(f"After latent_linear: {x.shape}")
+        x = x.unsqueeze(1)              # (B, 1, seq_len // 2**depth)
+        print(f"After unsqueeze: {x.shape}")
+        x = self.unpool_conv(x)         # (B, latent_dim, seq_len // 2**depth)
+        print(f"After unpool_conv: {x.shape}")
+        for conv in self.conv_list:
+            x = conv(x)
+            print(f"After conv: {x.shape}")
+        return x[..., :self.seq_len].squeeze(1)  # crop padding introduced in encoder
+
+if __name__ == "__main__":
+    import torch
+    seq_len = 2500
+    depth = 4
+    latent_dim = 64
+    encoder = Encoder(seq_len, depth, latent_dim)
+    decoder = Decoder(seq_len, depth, latent_dim)
+
+    x = torch.randn(1, seq_len) # (B, seq_len)
+    z = encoder(x)
+    x_recon = decoder(z)
+    print(f"Input shape: {x.shape}, Latent shape: {z.shape}, Reconstructed shape: {x_recon.shape}")

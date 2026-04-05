@@ -69,3 +69,100 @@ The key challenge is handling the 6 different sampling rates before feeding sign
 | 4 | **Chunked multi-vector encoding** (single adaptive model) | Most flexible; borrows from dense retrieval; most complex |
 
 **Starting with Option 1 (downsample to 250 Hz) as the baseline.** This gives a single uniform input size (`2500` samples for 10s Lead II, `625` samples for 2.5s segments) and maximises simplicity for the first training run. Higher-quality preprocessing strategies can be evaluated once there is a working baseline to compare against.
+
+# Signal Autoencoder Architecture Design
+
+## Overview
+
+The signal autoencoder is a 1D CNN bottleneck autoencoder. The encoder compresses a raw ECG signal into a fixed-size latent vector; the decoder reconstructs the signal from that vector. The latent vector is the intended interface point for the image encoder in Stage 2 of the multi-stage training plan.
+
+## Architecture
+
+**Encoder:**
+- A stack of `depth` convolutional blocks, each doubling the number of channels and halving the sequence length via `MaxPool1d(stride=2)`.
+- Channels grow as powers of 2 (1 → 2 → 4 → 8 → `latent_dim` at the final block).
+- A `Conv1d(latent_dim, 1, kernel_size=1)` collapses the channel dimension back to 1, preserving sequence order.
+- A `Linear` layer maps the flattened sequence to a fixed `latent_dim`-dimensional vector.
+
+**Decoder:**
+- Mirrors the encoder in reverse.
+- A `Linear` layer expands the latent vector back to the compressed sequence length.
+- A `Conv1d(1, latent_dim, kernel_size=1)` restores the channel dimension.
+- A stack of `depth` transposed convolutional blocks, each halving channels and doubling sequence length via `Upsample(scale_factor=2)`.
+
+## Key Design Decision: Handling Arbitrary Sequence Lengths
+
+### The Problem
+
+With `depth=4`, the encoder applies 4 consecutive `stride=2` pooling operations, so the input must be divisible by $2^4 = 16$. The baseline sequence length of 2500 is not divisible by 16:
+
+$$2500 \div 16 = 156.25 \quad \Rightarrow \quad 156 \times 16 = 2496 \neq 2500$$
+
+The encoder produces 156 compressed timesteps, the decoder reconstructs $156 \times 16 = 2496$ samples, leaving a 4-sample shortfall.
+
+### Options Considered
+
+**Non-learned interpolation (`F.interpolate`)** — originally used as a quick fix. Stretches 2496 → 2500 using fixed linear interpolation. Not learned, distorts high-frequency content, and was rejected.
+
+**Design data to be a multiple of $2^{depth}$** — resampling to 2496 instead of 2500 works, but tightly couples preprocessing to the architectural hyperparameter `depth`. Changing depth later requires re-running the preprocessing pipeline.
+
+**Linear layer at the output** — learned, but a large dense linear over thousands of samples partially defeats the purpose of using a CNN. Rejected.
+
+**Pad input, crop output (chosen approach)** — the encoder zero-pads the input to the next multiple of $2^{depth}$ before the forward pass. The decoder reconstructs the padded length, then crops back to the original length. The network never sees the padded positions in the loss function. No interpolation, nothing non-learned, and no coupling between preprocessing and model depth.
+
+```
+Input (2500) → pad → (2512) → Encoder → Bottleneck (157) → Decoder → (2512) → crop → Output (2500)
+```
+
+### Implementation
+
+`padded_seq_len` is computed once at `__init__` time and used to size the linear layers:
+
+```python
+padded_seq_len = math.ceil(seq_len / (2 ** depth)) * (2 ** depth)
+```
+
+At forward time, padding is computed dynamically from `self.seq_len` and `self.depth`:
+
+```python
+# Encoder.forward
+pad = (2 ** self.depth - self.seq_len % (2 ** self.depth)) % (2 ** self.depth)
+x = F.pad(x, (0, pad))
+
+# Decoder.forward (after reconstruction)
+return x[..., :self.seq_len]
+```
+
+### Why This Is Better Than U-Net Style Skip Connections
+
+U-Net also solves this mismatch (via center-crop at each skip connection), but U-Net does not produce a single compact latent vector — the skip connections bypass the bottleneck, making the latent space non-compact. Since Stage 2 of this project requires a single latent vector as the bridge between the signal and image encoders, a pure bottleneck autoencoder without skip connections is the correct choice.
+
+## Multi-Sample-Rate Compatibility
+
+Because `seq_len` and `depth` are constructor parameters, separate models for different sample rates are straightforward:
+
+```python
+model_250hz  = Autoencoder(seq_len=2500, depth=4, latent_dim=64)  # 250 Hz, 10s
+model_500hz  = Autoencoder(seq_len=5000, depth=4, latent_dim=64)  # 500 Hz, 10s
+model_1000hz = Autoencoder(seq_len=10000, depth=4, latent_dim=64) # 1000 Hz, 10s
+```
+
+Each model handles its own geometry internally. The pad/crop logic in `forward` is computed at runtime from the stored `seq_len` and `depth`, so no preprocessing changes are needed when changing depth — the model adapts automatically.
+
+**Note:** Models trained at different sample rates have different `latent_linear` sizes (since `padded_seq_len // 2^depth` differs) and their latent spaces are not directly comparable. Cross-rate latent compatibility would require an additional alignment step.
+
+## Future Work: Rate-Conditioned Single Model
+
+Rather than training separate models per sample rate, the autoencoder could be conditioned on sample rate as a context signal — one model, one latent space, across all rates. This is the same pattern used in diffusion models (timestep conditioning) and conditional generation (FiLM). Several approaches in increasing order of expressiveness:
+
+**Scalar concatenation** — append the sample rate (normalized) to the latent vector before any downstream head. Simple but only influences the fully-connected layers, not the conv stack.
+
+**Feature-wise Linear Modulation (FiLM)** — at each conv block, predict a scale $\gamma$ and shift $\beta$ from the sample rate embedding and apply:
+$$y = \gamma(r) \cdot \text{conv}(x) + \beta(r)$$
+This lets the sample rate modulate every layer's activations, including the conv stack. The model can learn that a QRS complex spans ~100 samples at 1000 Hz and ~25 samples at 250 Hz, and adjust its effective receptive field accordingly.
+
+**Sinusoidal / learned rate embedding** — embed the sample rate into a vector (like a positional encoding) and add it to feature maps at each scale. Most expressive; closest to how diffusion models handle the timestep.
+
+**Temporal scale normalization (physics-informed)** — instead of telling the model the sample rate, normalize time by segmenting on heartbeat cycles (requires upstream R-peak detection). The model always sees the same temporal structure regardless of rate — sidesteps the problem entirely.
+
+This is particularly relevant for Stage 2: if the image encoder must map to the same latent space as the signal encoder, a rate-conditioned single latent space is far cleaner than maintaining one latent space per rate.
