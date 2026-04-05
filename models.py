@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 class Encoder(nn.Module):
-    def __init__(self, seq_len, depth, latent_dim): # 2500, 4, 64
+    def __init__(self, seq_len, depth, latent_dim): # 625, 4, 64
         super().__init__()
         self.seq_len = seq_len
         self.depth = depth
@@ -34,12 +34,9 @@ class Encoder(nn.Module):
         x = x.unsqueeze(1)  # (B, 1, padded_seq_len)
         for conv in self.conv_list:
             x = conv(x)
-            print(f"After conv: {x.shape}")
         x = self.pool_conv(x)
-        print(f"After pool_conv: {x.shape}")
         x = x.view(x.size(0), -1)
         x = self.latent_linear(x)
-        print(f"After latent_linear: {x.shape}")
         return x
 
 class Decoder(nn.Module):
@@ -65,21 +62,28 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         x = self.latent_linear(x)       # (B, seq_len // 2**depth)
-        print(f"After latent_linear: {x.shape}")
         x = x.unsqueeze(1)              # (B, 1, seq_len // 2**depth)
-        print(f"After unsqueeze: {x.shape}")
         x = self.unpool_conv(x)         # (B, latent_dim, seq_len // 2**depth)
-        print(f"After unpool_conv: {x.shape}")
         for conv in self.conv_list:
             x = conv(x)
-            print(f"After conv: {x.shape}")
         return x[..., :self.seq_len].squeeze(1)  # crop padding introduced in encoder
+
+class Autoencoder(nn.Module):
+    def __init__(self, seq_len, depth, latent_dim):
+        super().__init__()
+        self.encoder = Encoder(seq_len, depth, latent_dim)
+        self.decoder = Decoder(seq_len, depth, latent_dim)
+
+    def forward(self, x):
+        z = self.encoder(x)
+        x_recon = self.decoder(z)
+        return x_recon
 
 if __name__ == "__main__":
     import torch
-    seq_len = 2500
+    seq_len = 625
     depth = 4
-    latent_dim = 64
+    latent_dim = 32
     encoder = Encoder(seq_len, depth, latent_dim)
     decoder = Decoder(seq_len, depth, latent_dim)
 
@@ -87,3 +91,7 @@ if __name__ == "__main__":
     z = encoder(x)
     x_recon = decoder(z)
     print(f"Input shape: {x.shape}, Latent shape: {z.shape}, Reconstructed shape: {x_recon.shape}")
+
+    autoencoder = Autoencoder(seq_len, depth, latent_dim)
+    x_recon_auto = autoencoder(x)
+    print(f"Autoencoder reconstructed shape: {x_recon_auto.shape}")
