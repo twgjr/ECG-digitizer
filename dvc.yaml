@@ -45,17 +45,22 @@ stages:
   # Stage 1: Train a 1D signal autoencoder to learn a latent ECG representation.
   # Uses only the raw waveform signals — no images loaded, so fast and cheap.
   train_signal_autoencoder:
-    cmd: python train.py --stage signal_autoencoder
+    cmd: python train.py fit --config configs/signal_autoencoder.yaml
     deps:
       - train.py
+      - lit_model.py
+      - datamodule.py
+      - callbacks.py
       - models.py
-      - data.py
-      - data/manifests/train.csv
-      - data/manifests/val.csv
+      - dataset.py
+      - configs/signal_autoencoder.yaml
+      - data/train.csv
+      - data/train
     params:
       - params.yaml:
-          - training
           - signal_autoencoder
+    outs:
+      - checkpoints/signal_autoencoder
     metrics:
       - metrics/signal_autoencoder.json:
           cache: false

@@ -166,3 +166,121 @@ This lets the sample rate modulate every layer's activations, including the conv
 **Temporal scale normalization (physics-informed)** — instead of telling the model the sample rate, normalize time by segmenting on heartbeat cycles (requires upstream R-peak detection). The model always sees the same temporal structure regardless of rate — sidesteps the problem entirely.
 
 This is particularly relevant for Stage 2: if the image encoder must map to the same latent space as the signal encoder, a rate-conditioned single latent space is far cleaner than maintaining one latent space per rate.
+
+# Signal Autoencoder Training — April 5, 2026
+
+## Overview
+
+A full day of experimentation on the signal autoencoder covering architecture hyperparameter tuning and a systematic exploration of loss functions. The best checkpoint to date is `checkpoints/run_002/epoch=059-val_loss=0.0425.ckpt`, trained with `mae+mrstft` loss. All experiments used `seq_len=625`, `batch_size=256`, `lr_patience=5`, `lr_factor=0.5`, `weight_decay=1e-5`, and the ReduceLROnPlateau scheduler unless noted otherwise.
+
+---
+
+## Phase 1: Architecture Hyperparameter Sweep (MSE loss)
+
+All runs in this phase used MSE as the training and validation loss. Loss values are directly comparable across runs.
+
+| Version | depth | latent_dim | base_kernels | lr | Best val/loss (MSE) | Notes |
+|---------|-------|-----------|--------------|-----|---------------------|-------|
+| v0 | 8 | 32 | — | 1e-3 | 0.00582 | Initial baseline, no `base_kernels` param |
+| v3–v5 | 8 | 32 | 16 | 1e-3 | 0.00630 | Introduced `base_kernels`; slightly worse than v0 |
+| v6 | 8 | 32 | 32 | 1e-3 | 0.00531 | Wider channels help |
+| v7 | 8 | 32 | 32 | 1e-2 | 0.01102 | LR 10× too high with this latent size; diverged |
+| v8 | 8 | **64** | 32 | 1e-3 | **0.00276** | Doubling latent_dim gave the biggest single gain |
+| v13 | **9** | 64 | 32 | 1e-3 | 0.00552 | Extra depth hurt slightly; more compression than signal complexity warrants |
+| v9–v12 | 9–10 | 64 | 32 | 1e-3 | — | Aborted (small batch sizes 4–16 caused instability / very slow) |
+
+**Key findings:**
+- `latent_dim=64` was the most impactful change (0.00582 → 0.00276).
+- `base_kernels=32` was better than 16.
+- `depth=8` beat `depth=9` — adding more pooling stages compresses the 625-sample signal into just 3 timesteps at the bottleneck, which appears to be over-aggressive.
+- `lr=1e-3` with the scheduler consistently outperformed `lr=1e-2` for MSE training.
+
+---
+
+## Phase 2: Loss Function Exploration
+
+After settling on `depth=8, latent_dim=64, base_kernels=32` as the architecture, loss functions were explored systematically. MSE is a well-understood baseline but penalises large errors quadratically, which tends to produce over-smoothed reconstructions — it discourages the model from reconstructing sharp QRS spikes if it risks a large penalty.
+
+### Infrastructure added
+
+A `loss` string parameter was added to `SignalAutoencoderModule`, mapping to one of several loss functions. An `fft_alpha` parameter controls the blend weight for combination losses. Both are exposed in the YAML config. The validation step always logs `val/mae` and `val/mse` alongside `val/loss` regardless of which loss is being optimised, making runs cross-comparable on a common metric.
+
+### MAE (v15)
+
+| loss | fft_alpha | Best val/loss | val/mse (approx) |
+|------|-----------|--------------|-----------------|
+| mae | — | 0.0236 | — |
+
+The core motivation for switching to MAE was peak fidelity. MSE penalises errors quadratically — a 2× larger error contributes 4× the loss. In practice this makes the model risk-averse: it prefers a moderately wrong prediction everywhere over a sharp spike that might be slightly off, because the spike contributes disproportionately to the gradient. For ECG signals this is a problem precisely where accuracy matters most — the QRS complex is a fast, high-amplitude event and the MSE-trained model consistently under-estimated its amplitude, producing blurry peaks.
+
+MAE (`F.l1_loss`) treats all errors linearly, so a large error at a single timestep is penalised in proportion to its size rather than its square. The model is no longer incentivised to smooth out peaks to reduce variance in the loss. Visually, reconstructions showed noticeably sharper QRS complexes compared to any MSE run. The loss value is not comparable to MSE runs — they are on different absolute scales.
+
+### Pure FFT magnitude loss (v16–v17)
+
+Training on the magnitude spectrum of the full-signal FFT (`torch.fft.rfft`) alone.
+
+The reasoning for adding a frequency-domain term is that waveform morphology — the characteristic shape of P, QRS, and T waves — is encoded in the relative magnitudes and relationships of frequency components. A model trained only on time-domain MAE can reconstruct individual sample values accurately but still produce a signal that looks morphologically wrong if the spectral balance is off (e.g., too much high-frequency noise, or missing the smooth baseline). The FFT loss penalises mismatches in the frequency content of the whole signal, encouraging the model to reproduce the correct spectral envelope and thereby improve the shape of individual waves.
+
+- **v16** crashed immediately with `RuntimeError: cuFFT only supports dimensions whose sizes are powers of two when computing in half precision`. `16-mixed` precision caused `rfft` to run in float16 on a 625-sample sequence. **Fix:** cast inputs to `float32` before calling `rfft`.
+- **v17** (after fix): converged to `val/loss=0.765`. The FFT loss operates on a different scale (magnitudes of frequency bins, not signal amplitudes), so this number represents a different quantity. Trained on the spectrum alone, the model learned the correct frequency distribution but lost all temporal phase information — there is no constraint on *when* events occur, only on *what frequencies* are present. This is insufficient on its own for ECG reconstruction.
+
+### MAE + FFT (v18–v21)
+
+Combined loss: `(1 - alpha) * MAE + alpha * FFT_MAE`, giving the model simultaneous time-domain and frequency-domain supervision.
+
+The reasoning for combining rather than choosing one: pure FFT loss improved waveform shape but removed the per-sample temporal constraint. Pure MAE improved peak amplitude but had no explicit spectral regularisation. Adding the MAE term back re-introduces point-wise time-domain accuracy — the model must reconstruct each sample correctly *and* get the spectral balance right. For periodic signals like ECG, where the waveform repeats with a consistent profile, this combination is particularly effective: the FFT term enforces the correct overall shape and spectral envelope, while MAE pins individual points to the right amplitudes and preserves the correct timing of events.
+
+- **v18** (`alpha=0.5`): Crashed mid-training with `val/loss=nan`. Root cause: no window function was passed to `torch.stft`, causing a **rectangular window** to be applied. The rectangular window introduces severe spectral leakage — energy from each frequency bin bleeds into all others, producing large spurious magnitudes that inflated gradient norms and drove the loss to NaN. **Fix:** switched to Hann window (`torch.hann_window`), which tapers each frame smoothly to zero at its edges.
+- **v19** (`alpha=0.5`, after fix): Stable training, `val/loss=0.345`.
+- **v20** (`alpha=0.25`): `val/loss=0.0907`. The lighter frequency weighting gave the time-domain MAE more influence and produced significantly better results.
+- **v21** (`alpha=0.5`): `val/loss=0.447`. More frequency weight consistently hurt.
+
+`alpha=0.25` was clearly the sweet spot for `mae+fft`. The sensitivity to `alpha` confirms the intuition: the MAE term is doing the heavy lifting for temporal accuracy, and the FFT term is acting as a shape regulariser — useful, but should not dominate.
+
+### Multi-Resolution STFT loss (v22–v23) — current best
+
+The single-resolution FFT captures global frequency content but is blind to how frequency composition changes over time. An ECG signal is explicitly non-stationary: the QRS complex is a brief, high-frequency transient; the P and T waves are slower, smoother events; and the baseline is near-DC. A global FFT treats all of these as a single flat spectrum, so if the QRS is poorly reconstructed the model gets penalised in the high-frequency bins but cannot tell *where* in time the problem occurred. This limits its ability to drive improvements in localised morphology.
+
+The Short-Time Fourier Transform (STFT) divides the signal into overlapping frames and computes the FFT of each frame, producing a time-frequency representation. The MRSTFT loss runs this at multiple `(n_fft, hop)` resolutions and averages the per-resolution magnitude MAEs. Small windows (fine resolution) see local transients like QRS spikes; large windows (coarse resolution) see global spectral structure like the P and T wave envelopes. Training against both simultaneously biases the model toward reconstructing the signal correctly at every temporal scale, addressing aperiodic and morphologically variable waveforms that the global FFT could not capture well.
+
+Mixing MRSTFT with MAE plays the same role as in `mae+fft`: the spectral terms improve wave shape across scales, while the MAE term anchors the reconstruction to correct point-wise amplitudes in the time domain, preventing the model from drifting to spectrally plausible but temporally displaced waveforms.
+
+Resolutions used: `(32, 8)`, `(64, 16)`, `(128, 32)`, `(256, 64)` — spanning fine-grained temporal detail to coarse spectral structure.
+
+| Version | loss | fft_alpha | lr | Best val/loss |
+|---------|------|-----------|-----|--------------|
+| v22 | mae+mrstft | 0.5 | 1e-2 | 0.0779 |
+| v23 | mae+mrstft | 0.5 | 1e-2 | **0.0425** ← current best |
+
+`lr=1e-2` worked well here, likely because the MRSTFT loss landscape is smoother and better conditioned than MSE, allowing a larger learning rate. The same `lr=1e-2` had failed badly in the pure MSE phase (v7: 0.0110 vs 0.00276 for v8 at 1e-3).
+
+Like the FFT loss, MRSTFT magnitude values are not on the same scale as MSE, so the `val/loss` numbers are not directly comparable to the MSE-phase results. Visual inspection of reconstructions via `inspect_val.py` confirmed that the MRSTFT-trained model produces the sharpest QRS complexes and best-preserved waveform morphology of all runs to date.
+
+---
+
+## Current Best Configuration
+
+```yaml
+model:
+  seq_len: 625
+  depth: 8
+  latent_dim: 64
+  base_kernels: 32
+  lr: 1.0e-2
+  weight_decay: 1.0e-5
+  lr_patience: 5
+  lr_factor: 0.5
+  loss: mae+mrstft
+  fft_alpha: 0.5
+```
+
+Checkpoint: `checkpoints/run_002/epoch=059-val_loss=0.0425.ckpt`
+
+---
+
+## Next Steps
+
+- Explore `fft_alpha` values below 0.5 for `mae+mrstft` (as `alpha=0.25` was found to help for `mae+fft`).
+- Consider adding a weighted combination of MRSTFT scales (currently all equal weight) to emphasise coarser or finer temporal resolution.
+- Evaluate whether `latent_dim=128` improves reconstruction given that the bottleneck at `depth=8` produces only 3 timesteps for a 625-sample input.
+- Begin Stage 2: freeze the trained decoder and train an image encoder to map ECG images to the same latent space.
