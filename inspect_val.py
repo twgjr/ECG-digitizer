@@ -13,7 +13,6 @@ Run:
     python inspect_val.py --out figures/val_inspection --no_show
 """
 import argparse
-import glob
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -33,8 +32,7 @@ def parse_args():
         "--ckpt",
         type=str,
         default=None,
-        help="Path to checkpoint. Defaults to the best (lowest val_loss) in "
-             "checkpoints/signal_autoencoder/.",
+        help="Path to checkpoint. Defaults to the best in the latest lightning_logs version.",
     )
     p.add_argument("--out", type=str, default="figures/val_inspection",
                    help="Directory to save figures.")
@@ -46,21 +44,41 @@ def parse_args():
 
 # ── CHECKPOINT ────────────────────────────────────────────────────────────────
 
-def best_checkpoint(ckpt_dir: str = "checkpoints/signal_autoencoder") -> str:
-    """Return the checkpoint path with the smallest val_loss in the filename."""
-    ckpts = glob.glob(f"{ckpt_dir}/*.ckpt")
+def best_checkpoint() -> str:
+    """Return the checkpoint from the highest-numbered lightning_logs version."""
+    version_dirs = sorted(
+        Path("lightning_logs").glob("version_*/checkpoints"),
+        key=lambda p: int(p.parent.name.split("_")[1]),
+    )
+    if not version_dirs:
+        raise FileNotFoundError("No checkpoints found in lightning_logs/")
+    ckpt_dir = version_dirs[-1]
+    ckpts = list(ckpt_dir.glob("*.ckpt"))
     if not ckpts:
-        raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
+        raise FileNotFoundError(f"No .ckpt files in {ckpt_dir}")
 
-    def val_loss(path: str) -> float:
-        name = Path(path).stem
-        # filename pattern: epoch=049-val_loss=0.0132
-        for part in name.split("-"):
+    def val_loss(path: Path) -> float:
+        for part in path.stem.split("-"):
             if part.startswith("val_loss="):
                 return float(part.split("=")[1])
         return float("inf")
 
-    return min(ckpts, key=val_loss)
+    return str(min(ckpts, key=val_loss))
+
+
+# ── SNR ──────────────────────────────────────────────────────────────────────
+
+def compute_snr(x: np.ndarray, x_hat: np.ndarray, eps: float = 1e-10) -> np.ndarray:
+    """
+    Per-sample reconstruction SNR in dB.
+
+    SNR = 10 * log10(signal_power / noise_power)
+    signal_power = mean(x^2)  per sample
+    noise_power  = mean((x - x_hat)^2) = MSE per sample
+    """
+    signal_power = (x ** 2).mean(axis=1)
+    noise_power  = ((x - x_hat) ** 2).mean(axis=1)
+    return 10.0 * np.log10(signal_power / (noise_power + eps))
 
 
 # ── INFERENCE ─────────────────────────────────────────────────────────────────
@@ -73,7 +91,7 @@ def run_inference(model: torch.nn.Module, dm: ECGDataModule, device: torch.devic
     Returns:
         x_all:     (N, 625) numpy array of original signals
         x_hat_all: (N, 625) numpy array of reconstructions
-        mse_all:   (N,)     per-sample MSE
+        snr_all:   (N,)     per-sample reconstruction SNR in dB
     """
     model.eval()
     xs, x_hats = [], []
@@ -87,8 +105,8 @@ def run_inference(model: torch.nn.Module, dm: ECGDataModule, device: torch.devic
     x_all = torch.cat(xs, dim=0).numpy()      # (N, 625)
     x_hat_all = torch.cat(x_hats, dim=0).numpy()
 
-    mse_all = ((x_all - x_hat_all) ** 2).mean(axis=1)  # (N,)
-    return x_all, x_hat_all, mse_all
+    snr_all = compute_snr(x_all, x_hat_all)   # (N,) dB
+    return x_all, x_hat_all, snr_all
 
 
 # ── PLOTTING ──────────────────────────────────────────────────────────────────
@@ -97,7 +115,7 @@ def plot_samples(
     indices: list[int],
     x_all: np.ndarray,
     x_hat_all: np.ndarray,
-    mse_all: np.ndarray,
+    snr_all: np.ndarray,
     title_prefix: str,
     out_dir: Path,
     no_show: bool,
@@ -124,13 +142,13 @@ def plot_samples(
         x = x_all[idx]
         x_hat = x_hat_all[idx]
         err = np.abs(x - x_hat)
-        mse = mse_all[idx]
+        snr = snr_all[idx]
 
         # Row 0: overlay original and reconstruction
         ax0 = axes[0, col]
         ax0.plot(timesteps, x,     color="steelblue", linewidth=0.8, label="Original")
         ax0.plot(timesteps, x_hat, color="tomato",    linewidth=0.8, label="Reconstruction", alpha=0.85)
-        ax0.set_title(f"Sample #{idx}\nMSE={mse:.4f}", fontsize=9)
+        ax0.set_title(f"Sample #{idx}\nSNR={snr:.1f} dB", fontsize=9)
         if col == 0:
             ax0.set_ylabel("Signal", fontsize=9)
         ax0.legend(fontsize=7, loc="upper right")
@@ -158,6 +176,30 @@ def plot_samples(
     plt.close(fig)
 
 
+def plot_snr_distribution(snr_all: np.ndarray, out_dir: Path, no_show: bool):
+    """Plot a histogram of per-sample reconstruction SNR values."""
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(snr_all, bins=40, color="steelblue", edgecolor="white", linewidth=0.4)
+    ax.axvline(snr_all.mean(), color="tomato", linewidth=1.5,
+               label=f"Mean = {snr_all.mean():.1f} dB")
+    ax.axvline(np.median(snr_all), color="darkorange", linewidth=1.5, linestyle="--",
+               label=f"Median = {np.median(snr_all):.1f} dB")
+    ax.set_xlabel("Reconstruction SNR (dB)", fontsize=10)
+    ax.set_ylabel("Count", fontsize=10)
+    ax.set_title("Validation Set — SNR Distribution", fontsize=12, fontweight="bold")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fname = out_dir / "snr_distribution.png"
+    fig.savefig(fname, dpi=150, bbox_inches="tight")
+    print(f"Saved → {fname}")
+
+    if not no_show:
+        plt.show()
+    plt.close(fig)
+
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -176,23 +218,26 @@ def main():
 
     # ── Inference ──
     print("Running inference on validation set …")
-    x_all, x_hat_all, mse_all = run_inference(model, dm, device)
-    print(f"Validation samples: {len(mse_all)}, "
-          f"mean MSE: {mse_all.mean():.4f}, "
-          f"min: {mse_all.min():.4f}, max: {mse_all.max():.4f}")
+    x_all, x_hat_all, snr_all = run_inference(model, dm, device)
+    print(f"Validation samples : {len(snr_all)}")
+    print(f"SNR  — mean: {snr_all.mean():.1f} dB  "
+          f"min: {snr_all.min():.1f} dB  max: {snr_all.max():.1f} dB")
 
-    # ── Rank ──
-    ranked = np.argsort(mse_all)
-    best_idx = ranked[:3].tolist()
-    worst_idx = ranked[-3:][::-1].tolist()
+    # ── Rank by SNR ──
+    ranked_snr = np.argsort(snr_all)
+    worst_snr_idx = ranked_snr[:3].tolist()          # lowest SNR = worst
+    best_snr_idx  = ranked_snr[-3:][::-1].tolist()  # highest SNR = best
 
     out_dir = Path(args.out)
 
     # ── Plot ──
-    plot_samples(best_idx,  x_all, x_hat_all, mse_all,
-                 "Best 3 (lowest MSE)",  out_dir, args.no_show)
-    plot_samples(worst_idx, x_all, x_hat_all, mse_all,
-                 "Worst 3 (highest MSE)", out_dir, args.no_show)
+    plot_samples(best_snr_idx,  x_all, x_hat_all, snr_all,
+                 "Best 3 (highest SNR)",  out_dir, args.no_show)
+    plot_samples(worst_snr_idx, x_all, x_hat_all, snr_all,
+                 "Worst 3 (lowest SNR)",  out_dir, args.no_show)
+
+    # ── SNR distribution plot ──
+    plot_snr_distribution(snr_all, out_dir, args.no_show)
 
 
 if __name__ == "__main__":

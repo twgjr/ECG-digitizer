@@ -8,7 +8,6 @@ trainer:
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: checkpoints/signal_autoencoder
         filename: "epoch={epoch:03d}-val_loss={val/loss:.4f}"
         monitor: val/loss
         mode: min
