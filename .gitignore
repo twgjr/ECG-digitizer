@@ -4,3 +4,4 @@ lightning/
 image_generation/ecg_image_kit/
 /data
 /figures
+/lightning_logs
