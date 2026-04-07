@@ -1,0 +1,40 @@
+# Overfit sanity check: memorize 1 batch of 32 samples.
+# Loss should approach ~0 within ~300 epochs to confirm the model and
+# training loop are correct before scaling to full training.
+#
+# Run: python train.py fit --config configs/overfit_test.yaml
+
+seed_everything: 42
+
+trainer:
+  max_epochs: 300
+  precision: "32-true"   # fp32 for clearer signal — no fp16 masking
+  overfit_batches: 1     # train and evaluate on exactly 1 batch
+  log_every_n_steps: 1
+  enable_checkpointing: false  # diagnostic run — no checkpoints needed
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.RichProgressBar
+  logger:
+    class_path: lightning.pytorch.loggers.CSVLogger
+    init_args:
+      save_dir: logs
+      name: overfit_test
+
+model:
+  seq_len: 625
+  depth: 4
+  latent_dim: 256
+  base_kernels: 16
+  lr: 1.0e-2
+  weight_decay: 0.0
+  use_scheduler: false
+
+data:
+  csv_path: data/train.csv
+  data_dir: data/train
+  batch_size: 8       # tiny — easy to memorize, fast to verify
+  num_workers: 0      # simpler for a quick test
+  pin_memory: false
+  val_size: 0.1
+  test_size: 0.1
+  random_state: 42

@@ -1,0 +1,48 @@
+seed_everything: 42
+
+trainer:
+  max_epochs: 100
+  precision: "16-mixed"
+  gradient_clip_val: 1.0
+  log_every_n_steps: 20
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        filename: "epoch={epoch:03d}-val_loss={val/loss:.4f}"
+        monitor: val/loss
+        mode: min
+        save_top_k: 1
+        auto_insert_metric_name: false
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 10
+        mode: min
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+    - class_path: callbacks.MetricsJsonCallback
+      init_args:
+        filepath: metrics/signal_autoencoder.json
+
+model:
+  seq_len: 625
+  depth: 8
+  latent_dim: 64
+  base_kernels: 32 
+  lr: 1.0e-2
+  weight_decay: 1.0e-5
+  lr_patience: 5
+  lr_factor: 0.5
+  loss: mae+mrstft  # options: mse, mae, fft, mae+fft, mrstft, mae+mrstft
+  fft_alpha: 0.5  # mae+fft / mae+mrstft only: weight of freq term; (1-alpha)*mae + alpha*freq
+
+data:
+  csv_path: data/train.csv
+  data_dir: data/train
+  batch_size: 256
+  num_workers: 4
+  pin_memory: true
+  val_size: 0.1
+  test_size: 0.1
+  random_state: 42

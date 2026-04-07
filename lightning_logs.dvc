@@ -1,0 +1,6 @@
+outs:
+- md5: a64a3fb5436b40612061bc1e5a9db5dc.dir
+  size: 211355051
+  nfiles: 3
+  hash: md5
+  path: lightning_logs
