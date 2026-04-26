@@ -59,8 +59,6 @@ stages:
     params:
       - params.yaml:
           - signal_autoencoder
-    outs:
-      - checkpoints/signal_autoencoder
     metrics:
       - metrics/signal_autoencoder.json:
           cache: false

@@ -3,3 +3,4 @@
 ['remote "azureml"']
     url = azure://data
     account_name = circuitsimdatadvc
+    allow_anonymous_login = true
